@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ocp-map-webhooks
+  labels:
+    app.kubernetes.io/name: revision-history-webhook
+    app.kubernetes.io/part-of: ocp-map

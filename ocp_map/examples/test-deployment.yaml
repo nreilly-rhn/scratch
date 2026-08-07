@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: revision-history-demo
+  namespace: default
+  labels:
+    app: revision-history-demo
+spec:
+  replicas: 1
+  # Intentionally high / wrong — webhook should force this to 3.
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: revision-history-demo
+  template:
+    metadata:
+      labels:
+        app: revision-history-demo
+    spec:
+      containers:
+        - name: pause
+          image: registry.access.redhat.com/ubi9/pause:latest
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

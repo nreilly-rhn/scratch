@@ -1,0 +1,36 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: set-revision-history-limit
+  labels:
+    app.kubernetes.io/name: revision-history-webhook
+    app.kubernetes.io/part-of: ocp-map
+  annotations:
+    # OpenShift service-CA injects the cluster service CA into each webhook caBundle.
+    service.beta.openshift.io/inject-cabundle: "true"
+webhooks:
+  - name: revisionhistorylimit.ocp-map.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    reinvocationPolicy: IfNeeded
+    timeoutSeconds: 10
+    namespaceSelector:
+      matchLabels:
+        revision-history-webhook: enabled
+    objectSelector: {}
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+        scope: Namespaced
+    clientConfig:
+      # Placeholder replaced by service-CA injector; required for create on some versions.
+      caBundle: Cg==
+      service:
+        namespace: ocp-map-webhooks
+        name: revision-history-webhook
+        path: /mutate-deployment
+        port: 443

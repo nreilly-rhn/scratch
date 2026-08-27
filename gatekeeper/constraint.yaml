@@ -1,0 +1,21 @@
+# Warn/audit only: does not block apply. kubectl/oc print a Warning.
+# Existing objects are also scanned by Gatekeeper audit.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDrainRisk
+metadata:
+  name: notify-undrainable-workloads
+spec:
+  enforcementAction: warn
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet"]
+      - apiGroups: ["policy"]
+        kinds: ["PodDisruptionBudget"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+  parameters:
+    excludeControlPlane: true
+    topologyKeys:
+      - kubernetes.io/hostname

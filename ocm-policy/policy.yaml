@@ -1,0 +1,30 @@
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: audit-restrictive-pdb
+  namespace: default
+spec:
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: pdb-max-unavailable-zero
+        spec:
+          namespaceSelector:
+            exclude:
+              - kube-*
+              - openshift-*
+            include:
+              - "*"
+          object-templates:
+            - objectDefinition:
+                apiVersion: policy/v1
+                kind: PodDisruptionBudget
+                spec:
+                  maxUnavailable: 0
+              complianceType: mustnothave
+          remediationAction: inform
+          severity: medium
+  remediationAction: enforce

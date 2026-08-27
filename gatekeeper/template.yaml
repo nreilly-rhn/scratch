@@ -1,0 +1,205 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdrainrisk
+  annotations:
+    metadata.gatekeeper.sh/requires-sync-data: |
+      "[
+        [
+          {"groups":["apps"],"versions":["v1"],"kinds":["Deployment","StatefulSet"]},
+          {"groups":["policy"],"versions":["v1"],"kinds":["PodDisruptionBudget"]},
+          {"groups":[""],"versions":["v1"],"kinds":["Node"]}
+        ]
+      ]"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDrainRisk
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            excludeControlPlane:
+              type: boolean
+              description: Ignore control-plane nodes when counting topology domains (default true).
+            topologyKeys:
+              type: array
+              description: Anti-affinity topologyKeys that make drain rescheduling hard.
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdrainrisk
+
+        # Notify when a PDB cannot spare a single eviction.
+        violation[{"msg": msg}] {
+          pdb := input.review.object
+          pdb.kind == "PodDisruptionBudget"
+          replicas := matched_replicas(pdb)
+          pdb_blocks_one_eviction(pdb, replicas)
+          msg := sprintf("PodDisruptionBudget %s/%s allows 0 disruptions (minAvailable=%v maxUnavailable=%v replicas=%v); node drain will block", [ns(pdb), name(pdb), object.get(pdb.spec, "minAvailable", "n/a"), object.get(pdb.spec, "maxUnavailable", "n/a"), replicas])
+        }
+
+        # Notify when required anti-affinity plus a tight PDB cannot survive losing one topology domain (one node drain).
+        violation[{"msg": msg}] {
+          wl := input.review.object
+          is_workload(wl)
+          key := anti_affinity_key(wl.spec.template.spec)
+          remaining := remaining_domains(key)
+          remaining >= 0
+          replicas := workload_replicas(wl)
+          replicas > remaining
+          pdb := matching_pdb(wl, input.review.object.metadata.namespace)
+          pdb_blocks_one_eviction(pdb, replicas)
+          msg := sprintf("%s %s/%s has required anti-affinity on %q, %v replicas, and PDB %s that forbids eviction; after draining one domain only %v pods can be Ready", [wl.kind, ns(wl), name(wl), key, replicas, name(pdb), remaining])
+        }
+
+        # Same combined check when the admitted object is the PDB.
+        violation[{"msg": msg}] {
+          pdb := input.review.object
+          pdb.kind == "PodDisruptionBudget"
+          wl := matching_workload(pdb)
+          key := anti_affinity_key(wl.spec.template.spec)
+          remaining := remaining_domains(key)
+          remaining >= 0
+          replicas := workload_replicas(wl)
+          replicas > remaining
+          pdb_blocks_one_eviction(pdb, replicas)
+          msg := sprintf("PodDisruptionBudget %s/%s matches %s %s with required anti-affinity on %q; %v replicas cannot stay Ready with only %v domains after a drain", [ns(pdb), name(pdb), wl.kind, name(wl), key, replicas, remaining])
+        }
+
+        # Notify when required anti-affinity cannot place all replicas if one node/zone is cordoned (even without a PDB).
+        violation[{"msg": msg}] {
+          wl := input.review.object
+          is_workload(wl)
+          key := anti_affinity_key(wl.spec.template.spec)
+          remaining := remaining_domains(key)
+          remaining >= 0
+          replicas := workload_replicas(wl)
+          replicas > remaining
+          msg := sprintf("%s %s/%s required anti-affinity on %q with %v replicas but only %v other %s domains; replacements cannot schedule while a node is drained", [wl.kind, ns(wl), name(wl), key, replicas, remaining, key])
+        }
+
+        is_workload(obj) {
+          obj.kind == "Deployment"
+        }
+
+        is_workload(obj) {
+          obj.kind == "StatefulSet"
+        }
+
+        ns(obj) := object.get(obj.metadata, "namespace", input.review.namespace)
+        name(obj) := object.get(obj.metadata, "name", input.review.name)
+
+        workload_replicas(obj) := object.get(obj.spec, "replicas", 1)
+
+        topology_keys := object.get(object.get(input, "parameters", {}), "topologyKeys", ["kubernetes.io/hostname"])
+
+        anti_affinity_key(spec) := term.topologyKey {
+          terms := object.get(object.get(object.get(spec, "affinity", {}), "podAntiAffinity", {}), "requiredDuringSchedulingIgnoredDuringExecution", [])
+          term := terms[_]
+          term.topologyKey == topology_keys[_]
+        }
+
+        remaining_domains(key) := count(domains(key)) - 1
+
+        domains(key) := {val |
+          some n
+          node := data.inventory.cluster["v1"]["Node"][n]
+          usable_node(node)
+          val := object.get(node.metadata.labels, key, "")
+          val != ""
+        }
+
+        usable_node(node) {
+          object.get(node.spec, "unschedulable", false) != true
+          ready_node(node)
+          not skip_control_plane(node)
+        }
+
+        ready_node(node) {
+          cond := object.get(node.status, "conditions", [])[_]
+          cond.type == "Ready"
+          cond.status == "True"
+        }
+
+        skip_control_plane(node) {
+          object.get(object.get(input, "parameters", {}), "excludeControlPlane", true) == true
+          is_control_plane(node)
+        }
+
+        is_control_plane(node) {
+          object.get(node.metadata.labels, "node-role.kubernetes.io/control-plane", null) != null
+        }
+
+        is_control_plane(node) {
+          object.get(node.metadata.labels, "node-role.kubernetes.io/master", null) != null
+        }
+
+        pdb_blocks_one_eviction(pdb, replicas) {
+          max_un := object.get(pdb.spec, "maxUnavailable", null)
+          max_un != null
+          as_count(max_un, replicas) <= 0
+        }
+
+        pdb_blocks_one_eviction(pdb, replicas) {
+          min_av := object.get(pdb.spec, "minAvailable", null)
+          min_av != null
+          as_count(min_av, replicas) >= replicas
+        }
+
+        as_count(val, _) := val {
+          is_number(val)
+        }
+
+        as_count(val, _) := to_number(val) {
+          is_string(val)
+          not endswith(val, "%")
+        }
+
+        as_count(val, total) := n {
+          is_string(val)
+          endswith(val, "%")
+          pct := to_number(trim_suffix(val, "%"))
+          n := ceil(pct * total / 100)
+        }
+
+        pod_labels(wl) := object.get(object.get(object.get(wl.spec, "template", {}), "metadata", {}), "labels", {})
+
+        pdb_labels(pdb) := object.get(object.get(pdb.spec, "selector", {}), "matchLabels", {})
+
+        labels_match(selector, labels) {
+          count(selector) > 0
+          count([k | selector[k]; labels[k] == selector[k]]) == count(selector)
+        }
+
+        matching_pdb(wl, namespace) := pdb {
+          some n
+          pdb := data.inventory.namespace[namespace]["policy/v1"]["PodDisruptionBudget"][n]
+          labels_match(pdb_labels(pdb), pod_labels(wl))
+        }
+
+        matching_workload(pdb) := wl {
+          namespace := ns(pdb)
+          some n
+          wl := data.inventory.namespace[namespace]["apps/v1"]["Deployment"][n]
+          labels_match(pdb_labels(pdb), pod_labels(wl))
+        }
+
+        matching_workload(pdb) := wl {
+          namespace := ns(pdb)
+          some n
+          wl := data.inventory.namespace[namespace]["apps/v1"]["StatefulSet"][n]
+          labels_match(pdb_labels(pdb), pod_labels(wl))
+        }
+
+        matched_replicas(pdb) := replicas {
+          wl := matching_workload(pdb)
+          replicas := workload_replicas(wl)
+        }
+
+        matched_replicas(pdb) := 1 {
+          not matching_workload(pdb)
+        }
